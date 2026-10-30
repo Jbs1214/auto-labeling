@@ -12,8 +12,9 @@ __pycache__/
 *.key
 
 # 데이터 / 결과물 (Google Drive로 공유)
-features/
-labels_auto/
+features*/
+labels_auto*/
+*.log
 *.mp4
 *.csv
 

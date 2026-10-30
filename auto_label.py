@@ -9,7 +9,8 @@
   all       extract -> (calibrate) -> label 을 한 번에 (X, y 가 함께 저장된다)
 
 상태 이름은 손 라벨과 같게 맞춘다:
-  정상(눈 뜸) / 눈감김·고개숙임 / 하품 / 불확실(얼굴 없음)
+  정상(눈 뜸) / 눈감김 / 고개숙임(눈 뜸) / 하품 / 불확실(얼굴 없음)
+손 라벨은 눈감김과 고개숙임을 '눈감김·고개숙임' 하나로 묶었으므로, 손 라벨과 비교할 때만 둘을 합쳐 채점한다.
 """
 import argparse, glob, itertools, json, math, os, sys, urllib.request
 import numpy as np
@@ -20,14 +21,17 @@ MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
 R_EYE = [33, 160, 158, 133, 153, 144]      # 눈 6점 (기획서의 좌표 17개 중 12개)
 L_EYE = [362, 385, 387, 263, 373, 380]
 MOUTH = (61, 291, 13, 14)                  # 입꼬리 2 + 안쪽 윗입술/아랫입술 (4개), 코끝은 1번
-S_OK, S_CLOSE, S_YAWN, S_UNC = "정상(눈 뜸)", "눈감김·고개숙임", "하품", "불확실(얼굴 없음)"
+S_OK, S_CLOSE, S_HEAD, S_YAWN, S_UNC = "정상(눈 뜸)", "눈감김", "고개숙임(눈 뜸)", "하품", "불확실(얼굴 없음)"
+S_MANUAL_CLOSE = "눈감김·고개숙임"          # 손 라벨에서 눈감김과 고개숙임을 묶은 상태 이름
 MANUAL_SUFFIX = "_졸음라벨초안.json"
 DEFAULT = dict(eye_mode="ear", ear_ratio=0.65, blink_th=0.5, pitch_dev=20.0,
-               mar_th=0.5, min_close=0.25, min_yawn=0.8, lost_close=False)
+               mar_th=0.5, min_close=0.25, min_yawn=0.8, lost_close=False,
+               warn_s=1.5, sleep_s=3.0)   # 눈감김 연속 시간 기준: 주의(마이크로슬립)·졸음(수면), Euro NCAP SD-202 참고
+STAGES = ["정상", "주의", "졸음"]          # stage 인덱스 순서
 COLS = ["frame", "t_s", "face", "ear_l", "ear_r", "ear", "mar", "pitch", "yaw", "roll",
         "blink_l", "blink_r", "jaw_open"]
 X_COLS = COLS[2:]                          # 학습 입력 특징 (frame, t_s 제외)
-STATES = [S_OK, S_CLOSE, S_YAWN, S_UNC]    # y 인덱스 순서
+STATES = [S_OK, S_CLOSE, S_HEAD, S_YAWN, S_UNC]    # y 인덱스 순서
 
 
 # ───────────────────────── 1) 특징 추출 (MediaPipe 필요) ─────────────────────────
@@ -164,10 +168,21 @@ def label_frames(df, fps, p):
     yawn = drop_short(face & (mar > p["mar_th"]), max(1, int(round(p["min_yawn"] * fps))))
     state = np.full(n, S_OK, dtype=object)
     state[~face] = S_UNC
-    state[lost] = S_CLOSE
-    state[close_all] = S_CLOSE
+    state[lost] = S_HEAD                       # 얼굴이 사라진 구간은 고개를 크게 숙인 것으로 본다
+    state[close_all & ~closed] = S_HEAD        # 눈은 떴는데 고개만 벗어남
+    state[close_all & closed] = S_CLOSE
     state[yawn] = S_YAWN
     return state
+
+
+def eye_stage(state, fps, p):
+    """눈감김이 연속 warn_s 에 닿은 프레임부터 주의(1), sleep_s 에 닿은 프레임부터 졸음(2).
+    고개숙임은 보조 신호라 시간에 넣지 않는다."""
+    stage = np.zeros(len(state), dtype=int)
+    for a, b in runs(state == S_CLOSE):
+        el = (np.arange(b - a + 1) + 1) / fps          # 눈 감기 시작부터 지난 시간
+        stage[a:b + 1] = np.where(el >= p["sleep_s"], 2, np.where(el >= p["warn_s"], 1, 0))
+    return stage
 
 
 def to_segments(state, fps):
@@ -203,18 +218,19 @@ def auto_at(state, fps, t, half=0.25):
 
 def score(feats, manual, p):
     """손 라벨 시점마다 자동 상태를 비교한다. 정상·눈감김·하품만 채점(손 동작·불확실은 제외)."""
-    classes = [S_OK, S_CLOSE, S_YAWN]
+    classes = [S_OK, S_MANUAL_CLOSE, S_YAWN]
     tp = {c: 0 for c in classes}; fp = {c: 0 for c in classes}; fn = {c: 0 for c in classes}
     lost_close = [0, 0]
     for stem, (df, fps) in feats.items():
         if stem not in manual:
             continue
         st = label_frames(df, fps, p)
+        st = np.where((st == S_CLOSE) | (st == S_HEAD), S_MANUAL_CLOSE, st)   # 손 라벨처럼 합쳐서 비교
         for r in manual[stem]:
             if r["state"] not in classes:
                 continue
             pred = auto_at(st, fps, r["t_s"])
-            if r["state"] == S_CLOSE:
+            if r["state"] == S_MANUAL_CLOSE:
                 lost_close[1] += 1
                 lost_close[0] += int(pred == S_UNC)
             if pred == r["state"]:
@@ -284,21 +300,25 @@ def cmd_label(a):
         df, fps = load_features(pth)
         st = label_frames(df, fps, p)
         segs = to_segments(st, fps)
+        stage = eye_stage(st, fps, p)
         dur = round(len(df) / fps, 3)
         json.dump(dict(clip=stem, video_duration_s=dur, fps=round(fps, 2),
                        label_source="자동(MediaPipe Face Landmarker + 규칙), 사람 검수 전", params=p,
                        face_detect_rate=round(float(df.face.mean()), 3), segments=segs,
                        classes=STATES, feature_names=X_COLS,
                        X=np.round(df[X_COLS].fillna(0.0).values, 4).tolist(),  # [프레임 수, 특징 수], 얼굴 없음은 0
-                       y=[STATES.index(s) for s in st]),
+                       y=[STATES.index(s) for s in st],
+                       stage_classes=STAGES, stage=stage.tolist()),
                   open(os.path.join(a.out, stem + "_자동라벨.json"), "w", encoding="utf-8"),
                   ensure_ascii=False, indent=1)
         close_s = sum(s["end_s"] - s["start_s"] for s in segs if s["state"] == S_CLOSE)
         n_close = sum(1 for s in segs if s["state"] == S_CLOSE)
+        n_head = sum(1 for s in segs if s["state"] == S_HEAD)
         n_yawn = sum(1 for s in segs if s["state"] == S_YAWN)
         longest = max([s["end_s"] - s["start_s"] for s in segs if s["state"] == S_CLOSE], default=0)
         rows.append(dict(clip=stem, 길이_s=dur, 얼굴검출률=round(float(df.face.mean()), 3),
                          눈감김_횟수=n_close, 눈감김_합계_s=round(close_s, 2), 눈감김_최장_s=round(longest, 2),
+                         고개숙임_횟수=n_head, 최고단계=STAGES[stage.max(initial=0)],
                          하품_횟수=n_yawn))
     pd.DataFrame(rows).to_csv(os.path.join(a.out, "_요약.csv"), index=False, encoding="utf-8-sig")
     print(f"{len(rows)}개 클립 라벨 저장 -> {a.out} (요약: _요약.csv)")
@@ -325,14 +345,17 @@ def cmd_selftest(_):
         assert (S_CLOSE, 3.0, 4.0) in got, (mode, got)
         assert not any(s[0] == S_CLOSE and s[1] < 2 for s in got), "깜빡임을 눈감김으로 잘못 셈"
         assert any(s[0] == S_YAWN and abs(s[1] - 6.0) < 0.1 for s in got), got
-        assert any(s[0] == S_CLOSE and abs(s[1] - 5.0) < 0.1 for s in got), "고개 숙임을 놓침"
+        assert any(s[0] == S_HEAD and abs(s[1] - 5.0) < 0.1 for s in got), "고개 숙임을 놓침"
         assert any(s[0] == S_UNC for s in got), "얼굴 없음 구간 표기 누락"
     # 보정 로직: 정답 타임라인이 같으면 점수가 높아야 한다
     manual = [dict(t_s=round(i * 0.5, 1),
-                   state=(S_CLOSE if 3.0 <= i * 0.5 < 4.0 or 5.0 <= i * 0.5 < 5.3 else
+                   state=(S_MANUAL_CLOSE if 3.0 <= i * 0.5 < 4.0 or 5.0 <= i * 0.5 < 5.3 else
                           S_YAWN if 6.2 <= i * 0.5 < 7.5 else S_OK)) for i in range(20)]
     s = score({"x": (df, fps)}, {"x": manual}, dict(DEFAULT))
     assert s["macro_f1"] > 0.8, s
+    # 단계: 눈감김 연속 1.5초에 닿은 프레임부터 주의, 3초부터 졸음
+    stage = eye_stage(np.array([S_CLOSE] * 100 + [S_OK] * 10, dtype=object), fps, DEFAULT)
+    assert stage[43] == 0 and stage[44] == 1 and stage[88] == 1 and stage[89] == 2 and stage[100] == 0, stage
     print("selftest 통과", s["macro_f1"])
 
 
