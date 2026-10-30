@@ -1,0 +1,63 @@
+{
+ "params": {
+  "eye_mode": "ear",
+  "ear_ratio": 0.6,
+  "blink_th": 0.5,
+  "pitch_dev": 15.0,
+  "mar_th": 0.35,
+  "min_close": 0.1,
+  "min_yawn": 0.8,
+  "lost_close": true
+ },
+ "score": {
+  "macro_f1": 0.911,
+  "accuracy": 0.9152,
+  "per_class": {
+   "정상(눈 뜸)": {
+    "precision": 0.927,
+    "recall": 0.937,
+    "f1": 0.932,
+    "n": 285
+   },
+   "눈감김·고개숙임": {
+    "precision": 0.847,
+    "recall": 0.877,
+    "f1": 0.862,
+    "n": 114
+   },
+   "하품": {
+    "precision": 1.0,
+    "recall": 0.885,
+    "f1": 0.939,
+    "n": 61
+   }
+  },
+  "close_frames_face_lost": "0/114"
+ },
+ "default_score": {
+  "macro_f1": 0.8099,
+  "accuracy": 0.8435,
+  "per_class": {
+   "정상(눈 뜸)": {
+    "precision": 0.85,
+    "recall": 0.958,
+    "f1": 0.901,
+    "n": 285
+   },
+   "눈감김·고개숙임": {
+    "precision": 0.854,
+    "recall": 0.667,
+    "f1": 0.749,
+    "n": 114
+   },
+   "하품": {
+    "precision": 1.0,
+    "recall": 0.639,
+    "f1": 0.78,
+    "n": 61
+   }
+  },
+  "close_frames_face_lost": "11/114"
+ },
+ "clips": 30
+}

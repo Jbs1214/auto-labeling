@@ -1,0 +1,4 @@
+mediapipe==1.2.0
+opencv-python==4.10.0.84
+numpy==2.3.5
+pandas==3.0.6
